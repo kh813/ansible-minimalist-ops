@@ -1,0 +1,32 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    systemd \
+    systemd-sysv \
+    openssh-server \
+    sudo \
+    python3 \
+    curl \
+    nginx \
+    update-notifier-common \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# SSH & Nginx 有効化
+RUN systemctl enable ssh && systemctl enable nginx
+
+# opsadmin ユーザー作成（手順書「4.1 管理対象側の受入準備」通り）
+RUN useradd -m -s /bin/bash opsadmin && \
+    echo "opsadmin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/opsadmin && \
+    chmod 440 /etc/sudoers.d/opsadmin
+
+# ヘルスチェック用Webファイル・設定
+RUN mkdir -p /var/www/html && \
+    echo '{"status":"ok"}' > /var/www/html/health && \
+    echo 'ok' > /var/www/html/healthz
+
+# systemd を PID 1 として起動
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]

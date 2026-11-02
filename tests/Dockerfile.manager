@@ -1,0 +1,28 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 手順書 3.1: 必要パッケージの導入
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-venv \
+    git \
+    curl \
+    util-linux \
+    openssh-client \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# opsadmin ユーザー作成
+RUN useradd -m -s /bin/bash opsadmin
+
+USER opsadmin
+WORKDIR /home/opsadmin
+
+# venvの作成とAnsible導入（ホストマウントに上書きされないようホーム直下に作成）
+RUN python3 -m venv /home/opsadmin/.venv && \
+    /home/opsadmin/.venv/bin/pip install --upgrade pip && \
+    /home/opsadmin/.venv/bin/pip install ansible
+
+WORKDIR /home/opsadmin/ansible-minimalist-ops
+CMD ["/bin/bash"]

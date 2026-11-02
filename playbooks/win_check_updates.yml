@@ -1,0 +1,35 @@
+---
+# ==============================================================================
+# win_check_updates.yml: Windows Update 差分スキャン & 通知
+# ==============================================================================
+- name: Windows 更新状態スキャンと通知
+  hosts: windows_servers
+  gather_facts: no
+  vars:
+    slack_webhook_url: "{{ lookup('env', 'SLACK_WEBHOOK_URL') | default('', true) }}"
+
+  tasks:
+    - name: Windows Update の検索（インストールは行わない）
+      ansible.windows.win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+        state: searched
+      register: win_updates_check
+
+    - name: 更新通知 (Slack)
+      when:
+        - win_updates_check.found_update_count > 0
+        - slack_webhook_url != ""
+      ansible.builtin.uri:
+        url: "{{ slack_webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            :warning: *【要対応】Windows セキュリティ更新検知*
+            ・対象ホスト: `{{ inventory_hostname }}` ({{ ansible_host | default(inventory_hostname) }})
+            ・未適用更新件数: *{{ win_updates_check.found_update_count }}* 件
+        status_code: 200
+      delegate_to: localhost
+      become: no

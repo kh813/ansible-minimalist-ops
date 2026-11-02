@@ -1,0 +1,28 @@
+---
+# ==============================================================================
+# mac_apply_updates.yml: macOS 端末の開発環境・CLIツール一括更新
+# 
+# 注意:
+# Apple Silicon (M1〜M4) 環境におけるOS本体更新は、Secure Token制約のため
+# MDM（Jamf Pro, Intune等）で実施することを推奨します。
+# 本PlaybookはHomebrewやCLI開発環境の自動更新・監査に専念します。
+# ==============================================================================
+- name: macOS 端末の開発環境・CLIツール一括更新
+  hosts: mac_clients
+  gather_facts: yes
+  become: no
+  vars:
+    homebrew_prefix: "{{ '/opt/homebrew' if ansible_architecture == 'arm64' else '/usr/local' }}"
+  environment:
+    PATH: "{{ homebrew_prefix }}/bin:{{ homebrew_prefix }}/sbin:{{ ansible_env.PATH }}"
+
+  tasks:
+    # 1. Homebrew パッケージの一括アップグレード（ユーザー権限で実行）
+    - name: Homebrew パッケージとCaskの更新
+      community.general.homebrew:
+        update_homebrew: yes
+        upgrade_all: yes
+
+    - name: 不要なキャッシュ・旧バージョンのクリーンアップ
+      ansible.builtin.command: "{{ homebrew_prefix }}/bin/brew cleanup"
+      changed_when: false

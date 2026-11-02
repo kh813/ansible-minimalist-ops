@@ -1,0 +1,268 @@
+---
+# ==============================================================================
+# apply_updates.yml: 安全なローリングアップデート＆深層事後検証
+# ==============================================================================
+- name: サーバーアップデート・安全再起動・深層事後検証
+  hosts: linux_servers
+  serial: 1            # 1台ずつ順番に処理（サービス全滅を防止）
+  gather_facts: yes
+  become: yes
+  vars:
+    slack_webhook_url: "{{ lookup('env', 'SLACK_WEBHOOK_URL') | default('', true) }}"
+    min_root_free_mb: 1024        # / に最低限必要な空き容量 (MB)
+    min_boot_free_mb: 200         # /boot に最低限必要な空き容量 (MB)
+    max_inode_used_percent: 90    # 許容する最大iノード使用率 (%)
+    drain_wait_seconds: 25        # LB切り離し後のコネクション抜け待ち時間 (秒)
+
+  tasks:
+    - name: 安全メンテナンス処理メインブロック
+      block:
+        # =========================================================
+        # 【第0防衛線】外部ネットワーク・DNS疎通チェック
+        # =========================================================
+        - name: 外部リポジトリおよびDNSへの疎通確認
+          ansible.builtin.uri:
+            url: "https://cloudflare.com"
+            status_code: [200, 301, 302]
+            timeout: 5
+          register: net_check
+          ignore_errors: yes
+
+        - name: ネットワーク不通時の安全スキップ
+          when: net_check.failed | default(false)
+          ansible.builtin.fail:
+            msg: "外部ネットワーク・DNSの名前解決が失敗しました。不完全なアップデートを防ぐため、本ホストの更新を安全に中断します。"
+
+        # =========================================================
+        # 【第1防衛線】ハードウェア・iノード・パッケージDB健全性検査
+        # =========================================================
+        - name: ルートパーティション(/)の空き容量確認
+          ansible.builtin.assert:
+            that:
+              - item.size_available > (min_root_free_mb * 1024 * 1024)
+            fail_msg: "【中止】/ の空き容量が不足しています（最低 {{ min_root_free_mb }}MB 必要）。"
+          loop: "{{ ansible_mounts }}"
+          when: item.mount == '/'
+
+        - name: /boot パーティションの空き容量確認（独立マウント時）
+          ansible.builtin.assert:
+            that:
+              - item.size_available > (min_boot_free_mb * 1024 * 1024)
+            fail_msg: "【中止】/boot の空き容量が不足しています（最低 {{ min_boot_free_mb }}MB 必要）。"
+          loop: "{{ ansible_mounts }}"
+          when: item.mount == '/boot'
+
+        - name: 各マウントポイントのiノード（inode）使用率確認
+          ansible.builtin.assert:
+            that:
+              - "(item.inode_used / item.inode_total * 100) < max_inode_used_percent"
+            fail_msg: "【中止】マウント {{ item.mount }} のiノードが枯渇寸前です（{{ max_inode_used_percent }}% 超過）。"
+          loop: "{{ ansible_mounts }}"
+          when: item.inode_total is defined and item.inode_total > 0
+
+        - name: 【Debian/Ubuntu】パッケージ管理DBの事前健全性チェック (dpkg --audit)
+          when: ansible_os_family == "Debian"
+          ansible.builtin.command: dpkg --audit
+          register: dpkg_audit
+          changed_when: false
+          failed_when: dpkg_audit.stdout != ""
+
+        - name: 【RHEL系】パッケージ管理DBの事前健全性チェック (dnf check)
+          when: ansible_os_family == "RedHat"
+          ansible.builtin.command: dnf check
+          register: dnf_check
+          changed_when: false
+          failed_when: dnf_check.rc != 0
+
+        # =========================================================
+        # 【無停止保証】トラフィックの安全なドレイン（LB切り離し）
+        # =========================================================
+        - name: LBヘルスチェックファイルの存在確認
+          when: drain_healthcheck_file is defined
+          ansible.builtin.stat:
+            path: "{{ drain_healthcheck_file }}"
+          register: hc_file_stat
+
+        - name: LBから安全に切り離し（ヘルスチェックファイルを一時退避）
+          when: 
+            - drain_healthcheck_file is defined
+            - hc_file_stat.stat.exists
+          ansible.builtin.command: "mv {{ drain_healthcheck_file }} {{ drain_healthcheck_file }}.disabled"
+
+        - name: 既存コネクションが抜けるまで待機（ドレイン待機）
+          when: 
+            - drain_healthcheck_file is defined
+            - hc_file_stat.stat.exists
+          ansible.builtin.pause:
+            seconds: "{{ drain_wait_seconds }}"
+
+        # =========================================================
+        # パッケージ更新（非対話モード・プロンプト停止の防止）
+        # =========================================================
+        - name: 【Debian/Ubuntu】OSアップデートの適用 (非対話モード)
+          when: ansible_os_family == "Debian"
+          ansible.builtin.apt:
+            update_cache: yes
+            upgrade: dist
+            autoremove: yes
+            dpkg_options: 'force-confdef,force-confold'
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+
+        - name: 【RHEL系】dnf アップデートの適用
+          when: ansible_os_family == "RedHat"
+          ansible.builtin.dnf:
+            name: "*"
+            state: latest
+
+        # =========================================================
+        # 【特権検証】管理者締め出し（SSHロックアウト）防止テスト
+        # =========================================================
+        - name: SSH接続セッションのリフレッシュ
+          ansible.builtin.meta: reset_connection
+
+        - name: パッチ適用後のsudo特権昇格テスト
+          ansible.builtin.command: whoami
+          register: sudo_test
+          changed_when: false
+          failed_when: sudo_test.stdout != "root"
+
+        # =========================================================
+        # 再起動が必要かの判定と実行
+        # =========================================================
+        - name: 【Debian/Ubuntu】再起動要求フラグの確認
+          when: ansible_os_family == "Debian"
+          ansible.builtin.stat:
+            path: /var/run/reboot-required
+          register: deb_reboot_needed
+
+        - name: 【RHEL系】再起動判定 (needs-restarting)
+          when: ansible_os_family == "RedHat"
+          ansible.builtin.command: needs-restarting -r
+          register: rhel_reboot_needed
+          failed_when: false
+          changed_when: false
+
+        - name: 再起動フラグの統合
+          ansible.builtin.set_fact:
+            needs_reboot: >-
+              {{
+                (deb_reboot_needed.stat.exists if ansible_os_family == 'Debian' else false) or
+                (rhel_reboot_needed.rc == 1 if ansible_os_family == 'RedHat' else false)
+              }}
+
+        - name: サーバーの再起動とSSH疎通再開待機
+          when: needs_reboot | bool
+          ansible.builtin.reboot:
+            msg: "ansible-minimalist-ops 定期メンテナンスによる再起動"
+            connect_timeout: 15
+            reboot_timeout: 600       # 最大10分待機
+            post_reboot_delay: 20     # 常駐プロセス安定まで20秒待機
+            test_command: whoami      # ログイン確認コマンド
+
+        # =========================================================
+        # 【深層事後検証】ヘルスチェック（OS差異吸収・DB・HTTP本文検証）
+        # =========================================================
+        - name: 【ヘルスチェック】基本SSHデーモンが稼働しているか
+          ansible.builtin.systemd:
+            name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+            state: started
+
+        - name: 【ヘルスチェック】ホスト固有の必須サービスが稼働しているか
+          ansible.builtin.systemd:
+            name: "{{ item }}"
+            state: started
+          loop: "{{ target_services | default([]) }}"
+
+        - name: 【ヘルスチェック】DB待受ポートの疎通確認
+          when: db_check_port is defined
+          ansible.builtin.wait_for:
+            host: "{{ ansible_host }}"
+            port: "{{ db_check_port }}"
+            state: started
+            timeout: 30
+          delegate_to: localhost
+          become: no
+
+        - name: 【ヘルスチェック】Webサービスが正常応答・本文キーワードを返しているか
+          when: healthcheck_url is defined
+          ansible.builtin.uri:
+            url: "{{ healthcheck_url }}"
+            status_code: 200
+            timeout: 10
+            return_content: yes
+          register: web_check
+          until: >
+            (web_check.status == 200) and
+            (healthcheck_expected_body is not defined or (healthcheck_expected_body | string in web_check.content))
+          retries: 12                # 10秒おきに最大12回（2分間）リトライ
+          delay: 10
+          delegate_to: localhost
+          become: no
+
+        # =========================================================
+        # 【トラフィック復帰】LBへの再組み込み（ドレイン解除）
+        # =========================================================
+        - name: LBヘルスチェックファイルの復元（トラフィック再開）
+          when: 
+            - drain_healthcheck_file is defined
+            - hc_file_stat.stat.exists
+          ansible.builtin.command: "mv {{ drain_healthcheck_file }}.disabled {{ drain_healthcheck_file }}"
+
+        # =========================================================
+        # 正常完了通知
+        # =========================================================
+        - name: 更新完了通知 (Slack)
+          when: slack_webhook_url != ""
+          ansible.builtin.uri:
+            url: "{{ slack_webhook_url }}"
+            method: POST
+            body_format: json
+            body:
+              text: |
+                :white_check_mark: *【成功】ホストメンテナンス完了*
+                ・対象ホスト: `{{ inventory_hostname }}` ({{ ansible_host }})
+                ・再起動実施: {{ 'あり' if (needs_reboot | bool) else 'なし (再起動不要)' }}
+                ・ヘルスチェック: 全テスト合格（LBトラフィック復帰完了）
+            status_code: 200
+          delegate_to: localhost
+          become: no
+
+      # =========================================================
+      # 【異常終了ハンドリング】ワンライナー付きエラー発報
+      # =========================================================
+      rescue:
+        - name: 退避したLBヘルスチェックファイルの緊急復元試行
+          when: drain_healthcheck_file is defined
+          ansible.builtin.shell: |
+            if [ -f "{{ drain_healthcheck_file }}.disabled" ]; then
+                mv "{{ drain_healthcheck_file }}.disabled" "{{ drain_healthcheck_file }}"
+            fi
+          ignore_errors: yes
+
+        - name: メンテナンス異常終了のアラート通知 (Slack)
+          when: slack_webhook_url != ""
+          ansible.builtin.uri:
+            url: "{{ slack_webhook_url }}"
+            method: POST
+            body_format: json
+            body:
+              text: |
+                :rotating_light: *【緊急警報】ホストメンテナンス失敗・安全中断*
+                ・対象ホスト: `{{ inventory_hostname }}` ({{ ansible_host }})
+                ・エラー詳細: `{{ ansible_failed_result.msg | default(ansible_failed_task.name | default('不明なタスクで失敗')) }}`
+                
+                :tools: *即時調査用ワンライナー:*
+                `ssh {{ ansible_user }}@{{ ansible_host }} "journalctl -xe --no-pager -n 50"`
+                
+                :arrow_forward: *単体再実行コマンド:*
+                `./run_ops.sh apply_updates.yml --limit {{ inventory_hostname }}`
+                
+                ※後続ホストの巻き添えを防ぐため、安全のため本ホストで実行を停止しました。
+            status_code: 200
+          delegate_to: localhost
+          become: no
+
+        - name: Playbookを明示的に失敗ステータスで終了
+          ansible.builtin.fail:
+            msg: "ホスト {{ inventory_hostname }} のメンテナンス中に異常が発生しました。"

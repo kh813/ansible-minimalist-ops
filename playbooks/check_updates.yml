@@ -1,0 +1,109 @@
+---
+# ==============================================================================
+# check_updates.yml: セキュリティ更新の定期監視・JSON集約・Slack通知
+# ==============================================================================
+- name: サーバーの更新状態スキャンとWebhook通知
+  hosts: linux_servers
+  gather_facts: yes
+  vars:
+    slack_webhook_url: "{{ lookup('env', 'SLACK_WEBHOOK_URL') | default('', true) }}"
+
+  tasks:
+    # --------------------------------------------------------------------------
+    # 1. Debian / Ubuntu の更新件数チェック
+    # --------------------------------------------------------------------------
+    - name: 【Debian/Ubuntu】パッケージリスト更新
+      when: ansible_os_family == "Debian"
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 1800
+
+    - name: 【Ubuntu】apt-check コマンドの確認
+      when: ansible_distribution == "Ubuntu"
+      ansible.builtin.stat:
+        path: /usr/lib/update-notifier/apt-check
+      register: apt_check_bin
+
+    - name: 【Ubuntu】更新件数の取得
+      when: 
+        - ansible_distribution == "Ubuntu"
+        - apt_check_bin.stat.exists
+      ansible.builtin.command: /usr/lib/update-notifier/apt-check
+      register: apt_check_raw
+      changed_when: false
+
+    - name: 【Ubuntu】件数のパース
+      when: 
+        - ansible_distribution == "Ubuntu"
+        - apt_check_bin.stat.exists
+      ansible.builtin.set_fact:
+        normal_updates: "{{ apt_check_raw.stderr.split(';')[0] | int }}"
+        security_updates: "{{ apt_check_raw.stderr.split(';')[1] | int }}"
+
+    - name: 【Debian】セキュリティ更新件数の算出
+      when: ansible_distribution == "Debian"
+      ansible.builtin.shell: |
+        apt-get -s dist-upgrade | grep "^Inst" | grep -iE "security|debian-security" | wc -l
+      register: debian_sec_raw
+      changed_when: false
+
+    - name: 【Debian】件数のセット
+      when: ansible_distribution == "Debian"
+      ansible.builtin.set_fact:
+        normal_updates: 0
+        security_updates: "{{ debian_sec_raw.stdout | int }}"
+
+    # --------------------------------------------------------------------------
+    # 2. RHEL / Rocky / AlmaLinux の更新件数チェック
+    # --------------------------------------------------------------------------
+    - name: 【RHEL系】dnf セキュリティ更新チェック
+      when: ansible_os_family == "RedHat"
+      ansible.builtin.command: dnf updateinfo list --security
+      register: rhel_sec_raw
+      failed_when: false
+      changed_when: false
+
+    - name: 【RHEL系】件数のセット
+      when: ansible_os_family == "RedHat"
+      ansible.builtin.set_fact:
+        normal_updates: 0
+        security_updates: "{{ (rhel_sec_raw.stdout_lines | length - 1) if (rhel_sec_raw.stdout_lines | length > 1) else 0 }}"
+
+    # --------------------------------------------------------------------------
+    # 3. 状態レポート出力（ダッシュボード・可視化連携用）
+    # --------------------------------------------------------------------------
+    - name: 各ホストの監査レポートを出力 (/tmp/audit_{{ inventory_hostname }}.json)
+      ansible.builtin.copy:
+        content: |
+          {
+            "host": "{{ inventory_hostname }}",
+            "ip": "{{ ansible_host }}",
+            "os": "{{ ansible_distribution }} {{ ansible_distribution_version }}",
+            "security_updates": {{ security_updates | default(0) }},
+            "last_checked": "{{ ansible_date_time.iso8601 }}"
+          }
+        dest: "/tmp/audit_{{ inventory_hostname }}.json"
+      delegate_to: localhost
+      become: no
+
+    # --------------------------------------------------------------------------
+    # 4. Webhook 通知（セキュリティ更新が1件以上ある場合のみ発報）
+    # --------------------------------------------------------------------------
+    - name: 重要アップデートのアラート通知 (Slack)
+      when:
+        - security_updates | default(0) | int > 0
+        - slack_webhook_url != ""
+      ansible.builtin.uri:
+        url: "{{ slack_webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            :warning: *【要更新】セキュリティアップデート検知*
+            ・対象ホスト: `{{ inventory_hostname }}` ({{ ansible_host }})
+            ・未適用セキュリティ更新: *{{ security_updates }}* 件
+            ・OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+            夜間の自動更新スケジュールで適用されるか、手動パッチ実行を検討してください。
+        status_code: 200
+      delegate_to: localhost
+      become: no

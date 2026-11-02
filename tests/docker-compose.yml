@@ -1,0 +1,39 @@
+services:
+  web01:
+    build:
+      context: .
+      dockerfile: Dockerfile.target
+    image: ansible-test-target
+    container_name: ansible-test-web01
+    privileged: true
+    cgroup: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      test_net:
+        ipv4_address: 172.28.0.21
+    restart: unless-stopped
+
+  manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.manager
+    image: ansible-test-manager
+    container_name: ansible-test-manager
+    volumes:
+      - ../:/home/opsadmin/ansible-minimalist-ops
+      - ./keys:/home/opsadmin/.ssh
+      - ./test_inventory.ini:/home/opsadmin/ansible-minimalist-ops/inventory/hosts.ini:ro
+    networks:
+      test_net:
+        ipv4_address: 172.28.0.10
+    command: ["sleep", "infinity"]
+    depends_on:
+      - web01
+
+networks:
+  test_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

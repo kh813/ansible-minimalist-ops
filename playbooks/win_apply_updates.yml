@@ -1,0 +1,30 @@
+---
+# ==============================================================================
+# win_apply_updates.yml: Windows サーバー・端末の更新と再起動
+# ==============================================================================
+- name: Windows サーバー・端末の更新と再起動
+  hosts: windows_servers
+  serial: 1
+  tasks:
+    # 1. 重要セキュリティ更新の自動検索・インストール
+    - name: 重要セキュリティ更新の適用
+      ansible.windows.win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+        reboot: yes                   # 多重再起動もAnsibleが自動待機
+        reboot_timeout: 1200          # Windows Updateの再起動待機（最大20分）
+      register: update_result
+
+    # 2. ヘルスチェック（必須サービスの稼働確認）
+    - name: 必須サービスの稼働確認
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - LanmanServer
+        - WinRM
+
+    - name: 完了メッセージ
+      ansible.builtin.debug:
+        msg: "Windowsホスト {{ inventory_hostname }} のパッチ適用と再起動復帰が完了しました。"
