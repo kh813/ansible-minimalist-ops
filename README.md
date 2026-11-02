@@ -32,8 +32,11 @@ ansible-minimalist-ops/
 ├── ansible.cfg                    # 共通設定（ログ出力、並列数、権限昇格等）
 ├── run_ops.sh                     # ★cron実行用ラッパースクリプト（flock排他・外監視連携）
 ├── inventory/
-│   └── hosts.ini                  # 対象ホスト一覧・パラメータ設定テンプレート
-└── playbooks/
+│   └── hosts.yml                  # 対象ホスト一覧・パラメータ設定 (YAML形式)
+├── docs/
+│   ├── STARTUP_GUIDE.md           # 🔰 初心者向けスタートアップガイド
+│   └── ADVANCED_GUIDE.md          # 🚀 熟練ユーザー向け拡張ガイド＆公式リンク集
+├── playbooks/
     ├── check_updates.yml          # 【Linux監視】脆弱性スキャン・JSON出力・Slack通知
     ├── apply_updates.yml          # 【Linux更新】事前検査・LBドレイン・更新・検証・緊急発報
     ├── win_check_updates.yml      # 【Windows監視】Windows Update差分スキャン & 通知
@@ -81,18 +84,30 @@ sudo chmod 440 /etc/sudoers.d/opsadmin
 
 ### 3. インベントリの編集
 
-`inventory/hosts.ini` を編集し、対象サーバーのIPやヘルスチェック情報を入力します。
+`inventory/hosts.yml` を編集し、対象サーバーのIPやヘルスチェック情報を入力します（YAML形式なのでクォートミスなく直感的に書けます）。
 
-```ini
-[linux_web]
-web01.corp.internal ansible_host=192.168.10.21 drain_healthcheck_file=/var/www/html/healthz healthcheck_url=http://192.168.10.21/health healthcheck_expected_body='{"status":"ok"}' target_services='["nginx"]'
+```yaml
+all:
+  children:
+    linux_servers:
+      children:
+        linux_web:
+          hosts:
+            web01.corp.internal:
+              ansible_host: 192.168.10.21
+              drain_healthcheck_file: /var/www/html/healthz
+              healthcheck_url: http://192.168.10.21/health
+              healthcheck_expected_body: ok
+              target_services:
+                - nginx
 
-[linux_db]
-db01.corp.internal  ansible_host=192.168.10.31 db_check_port=5432 target_services='["postgresql"]'
-
-[linux_servers:children]
-linux_web
-linux_db
+        linux_db:
+          hosts:
+            db01.corp.internal:
+              ansible_host: 192.168.10.31
+              db_check_port: 5432
+              target_services:
+                - postgresql
 ```
 
 ### 4. 手動実行テスト
@@ -140,6 +155,13 @@ linux_db
 
 ---
 
-## 📚 詳細マニュアル（仕様書）
+## 📚 ドキュメント体系
 
-システムの詳細なアーキテクチャ、サイジング、各パラメータの微調整ガイド、およびトラブルシューティングについては、[ansible_minimalist_ops.md](ansible_minimalist_ops.md) を参照してください。
+目的や習熟度に合わせて以下のドキュメントを参照してください。
+
+* 🔰 **[初心者向けスタートアップガイド](docs/STARTUP_GUIDE.md)**:
+  Ansibleに初めて触れる新任担当者向け。4つの基本用語、初回の3ステップ、構文チェックやPing疎通テスト、よくあるミス集。
+* 📖 **[実践 運用・保守詳細マニュアル（本編）](ansible_minimalist_ops.md)**:
+  アーキテクチャ詳細、多重防衛仕様、実機パラメータ微調整ガイド、トラブルシューティングを網羅した完全版仕様書。
+* 🚀 **[熟練ユーザー向け拡張ガイド ＆ リンク集](docs/ADVANCED_GUIDE.md)**:
+  Ansible Vaultによるシークレット暗号化、AWS/Azure動的インベントリ、AWX/AAP連携、公式リファレンスリンク集。

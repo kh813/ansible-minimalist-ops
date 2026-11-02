@@ -47,6 +47,14 @@ if [ -z "$PLAYBOOK" ]; then
     exit 1
 fi
 
+# 4. インベントリの自動構文検証（文法ミスを事前に即時検知）
+if ! ansible-inventory --list >/dev/null 2>&1; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 【構文エラー】インベントリ設定 (inventory/hosts.yml) に文法ミスがあります。" >&2
+    echo "--> エラー詳細:" >&2
+    ansible-inventory --list >&2 || true
+    exit 1
+fi
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] === メンテナンス開始: ${PLAYBOOK} ==="
 
 # 外部監視へ開始シグナル送信

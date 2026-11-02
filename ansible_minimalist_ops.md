@@ -174,51 +174,86 @@ become_user = root
 become_ask_pass = False
 ```
 
-### 3.5 インベントリファイル（`inventory/hosts.ini`）
+### 3.5 インベントリファイル（`inventory/hosts.yml`）
 
-WebサーバーとDBサーバーの依存関係、ロードバランサー切り離し用のヘルスチェックファイル、および深層ヘルスチェック用の変数を定義します。
+Ansible標準のYAMLインベントリを採用しています。配列や特殊記号をエスケープする必要がなく、クォートミスによる事故を防ぎます。
+WebサーバーとDBサーバーの依存関係、ロードバランサー切り離し用のヘルスチェックファイル、および深層ヘルスチェック用の変数を直感的に定義できます。
 
-```ini
-[all:vars]
-ansible_user=opsadmin
-ansible_ssh_private_key_file=~/.ssh/ansible_manager_key
-ansible_python_interpreter=/usr/bin/python3
+```yaml
+all:
+  vars:
+    ansible_user: opsadmin
+    ansible_ssh_private_key_file: ~/.ssh/ansible_manager_key
+    ansible_python_interpreter: /usr/bin/python3
 
-# =========================================================
-# フェーズ1: 稼働中 Linux サーバー（最優先）
-# =========================================================
-# Web / AP サーバー
-# - drain_healthcheck_file: LBが監視しているヘルスチェックファイル（一時退避でLBから安全にドレイン）
-# - healthcheck_url: 検証用エンドポイント
-# - healthcheck_expected_body: 期待するレスポンス本文のキーワード
-[linux_web]
-web01.corp.internal ansible_host=192.168.10.21 drain_healthcheck_file=/var/www/html/healthz healthcheck_url=http://192.168.10.21/health healthcheck_expected_body='{"status":"ok"}' target_services='["nginx"]'
-web02.corp.internal ansible_host=192.168.10.22 drain_healthcheck_file=/var/www/html/healthz healthcheck_url=http://192.168.10.22/health healthcheck_expected_body='{"status":"ok"}' target_services='["nginx"]'
+  children:
+    # =========================================================
+    # フェーズ1: 稼働中 Linux サーバー（最優先）
+    # =========================================================
+    linux_servers:
+      children:
+        # --- Web / AP サーバー群 ---
+        # - drain_healthcheck_file: LBが監視するファイル（一時退避で安全ドレイン）
+        # - healthcheck_url: 検証用エンドポイント
+        # - healthcheck_expected_body: 期待するレスポンス本文のキーワード
+        # - target_services: 必須常駐サービス一覧（配列）
+        linux_web:
+          hosts:
+            web01.corp.internal:
+              ansible_host: 192.168.10.21
+              drain_healthcheck_file: /var/www/html/healthz
+              healthcheck_url: http://192.168.10.21/health
+              healthcheck_expected_body: ok
+              target_services:
+                - nginx
 
-# DB サーバー（Webの依存先）
-# - db_check_port: 再起動復帰後に疎通確認する待受ポート
-[linux_db]
-db01.corp.internal  ansible_host=192.168.10.31 db_check_port=5432 target_services='["postgresql"]'
+            web02.corp.internal:
+              ansible_host: 192.168.10.22
+              drain_healthcheck_file: /var/www/html/healthz
+              healthcheck_url: http://192.168.10.22/health
+              healthcheck_expected_body: ok
+              target_services:
+                - nginx
 
-[linux_servers:children]
-linux_web
-linux_db
+        # --- DB / バックエンドサーバー群 ---
+        # - db_check_port: 再起動復帰後に疎通確認する待受ポート
+        linux_db:
+          hosts:
+            db01.corp.internal:
+              ansible_host: 192.168.10.31
+              db_check_port: 5432
+              target_services:
+                - postgresql
 
-# =========================================================
-# フェーズ2: Windows（次期展開・OpenSSH または WinRM）
-# =========================================================
-[windows_servers]
-# 【推奨】Windows標準のOpenSSHサーバーを利用する場合（Linuxと鍵認証を共通化可能）
-# win01.corp.internal ansible_host=192.168.20.101 ansible_user=opsadmin ansible_connection=ssh ansible_shell_type=powershell
+    # =========================================================
+    # フェーズ2: Windows（次期展開・OpenSSH または WinRM）
+    # =========================================================
+    windows_servers:
+      hosts:
+        # 【推奨】Windows標準のOpenSSHサーバーを利用する場合
+        # win01.corp.internal:
+        #   ansible_host: 192.168.20.101
+        #   ansible_user: opsadmin
+        #   ansible_connection: ssh
+        #   ansible_shell_type: powershell
 
-# 【従来方式】WinRMを利用する場合
-# win02.corp.internal ansible_host=192.168.20.102 ansible_user=Administrator ansible_connection=winrm ansible_port=5986 ansible_winrm_server_cert_validation=ignore
+        # 【従来方式】WinRMを利用する場合
+        # win02.corp.internal:
+        #   ansible_host: 192.168.20.102
+        #   ansible_user: Administrator
+        #   ansible_connection: winrm
+        #   ansible_port: 5986
+        #   ansible_winrm_server_cert_validation: ignore
 
-# =========================================================
-# フェーズ3: macOS 端末（将来拡張・開発環境更新）
-# =========================================================
-[mac_clients]
-# mac01.corp.internal ansible_host=192.168.20.51 ansible_user=admin_mac ansible_connection=ssh
+    # =========================================================
+    # フェーズ3: macOS 端末（将来拡張・開発環境更新）
+    # =========================================================
+    mac_clients:
+      hosts:
+        # mac01.corp.internal:
+        #   ansible_host: 192.168.20.51
+        #   ansible_user: admin_mac
+        #   ansible_connection: ssh
 ```
 
 ### 3.6 実機環境への導入・環境固有パラメータの微調整ガイド
@@ -890,4 +925,11 @@ Linuxの運用が定着した後、同一基盤にWindowsを追加します。
    * SSHロックアウト防止テスト
    * Nginxサービス＆深層Webヘルスチェック（HTTP 200 + 本文検証）
    * LBヘルスチェックファイルの正常復帰
+
+---
+
+## 10. 関連ガイド・ドキュメント
+
+* 🔰 **[初心者向け Ansible スタートアップガイド](docs/STARTUP_GUIDE.md)**: 基本用語、初回セットアップ、文法チェック、疎通Ping、よくあるミスと対策。
+* 🚀 **[熟練ユーザー向け拡張ガイド ＆ リンク集](docs/ADVANCED_GUIDE.md)**: Ansible Vault、AWS/Azure動的インベントリ、AWX連携、公式リファレンスリンク集。
 

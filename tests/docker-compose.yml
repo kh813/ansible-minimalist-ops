@@ -23,7 +23,7 @@ services:
     volumes:
       - ../:/home/opsadmin/ansible-minimalist-ops
       - ./keys:/home/opsadmin/.ssh
-      - ./test_inventory.ini:/home/opsadmin/ansible-minimalist-ops/inventory/hosts.ini:ro
+      - ./test_inventory.yml:/home/opsadmin/ansible-minimalist-ops/inventory/hosts.yml:ro
     networks:
       test_net:
         ipv4_address: 172.28.0.10
