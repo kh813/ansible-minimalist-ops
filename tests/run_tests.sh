@@ -21,7 +21,8 @@ mkdir -p "${KEYS_DIR}"
 if [ ! -f "${KEYS_DIR}/ansible_manager_key" ]; then
     echo "[1/5] テスト用 SSH 鍵ペアを作成中..."
     ssh-keygen -t ed25519 -C "test-manager@ops" -f "${KEYS_DIR}/ansible_manager_key" -N ""
-    cp "${KEYS_DIR}/ansible_manager_key.pub" "${KEYS_DIR}/authorized_keys"
+    # セキュリティ強化: from="IP" による接続元固定（手順書 2.3 の再現）
+    echo 'from="172.28.0.10" '$(cat "${KEYS_DIR}/ansible_manager_key.pub") > "${KEYS_DIR}/authorized_keys"
     chmod 600 "${KEYS_DIR}/ansible_manager_key"
     chmod 600 "${KEYS_DIR}/authorized_keys"
 else

@@ -48,7 +48,63 @@ keyed_groups:
 
 ---
 
-## 3. UI管理・チーム運用へのステップアップ（AWX / AAP）
+## 3. 管理サーバーの侵害耐性強化と多要素認証（MFA）
+
+Ansible管理サーバーは全配下ノードへの特権アクセス権を持つため、最重要防御対象です。夜間の自動バッチ実行（cron）を無人で回しつつ、外部からの不正アクセスや水平移動（Lateral Movement）を抑え込むための実践的セキュリティ構成です。
+
+### 3.1 管理コントローラーへの SSH 多要素認証（MFA: PAM Google Authenticator）
+管理サーバーへの対話的ログイン（SSH）に、パスワード＋スマホのワンタイムパスワード（TOTP）を必須化します。
+
+```bash
+# 1. パッケージのインストール (Ubuntu/Debian)
+sudo apt update && sudo apt install -y libpam-google-authenticator
+
+# 2. 初期設定の実行 (QRコード生成と秘密鍵の登録)
+google-authenticator -t -d -f -r 3 -R 30 -W
+
+# 3. PAM設定 (/etc/pam.d/sshd) に追加
+# 末尾に追記:
+# auth required pam_google_authenticator.so
+
+# 4. SSHD設定 (/etc/ssh/sshd_config.d/mfa.conf 等) の設定
+# KbdInteractiveAuthentication yes
+# AuthenticationMethods publickey,keyboard-interactive
+
+# 5. sshd 再起動
+sudo systemctl restart ssh
+```
+* これにより、管理サーバーに人間がログインする際は鍵認証に加えて6桁のMFAコードが求められます。
+* コントローラー内部のローカル cron は PAM/SSH を介さないため、夜間の自動パッチ適用は中断されることなく無人で完走します。
+
+### 3.2 ゼロトラストアクセスによる踏み台化（Tailscale / Cloudflare Access）
+管理サーバーの SSH ポート（22）をインターネットに直接公開せず、Identity-Aware な VPN / ゼロトラストネットワークを経由させます。
+
+* **Tailscale SSH**: 管理者の Google Workspace や Microsoft Entra ID による SSO + MFA 認証を通過した端末のみが SSH 接続可能になります。
+* **Cloudflare Tunnel + Access**: ブラウザ経由または `cloudflared` CLI 経由で IdP 認証を強制し、管理サーバーの IP を隠蔽します。
+
+### 3.3 sudo 権限最小化と Ansible モジュールの関係
+Ansible の `become: yes` は、ターゲット側で `sudo python3 ~/.ansible/tmp/...` を実行するため、`/etc/sudoers` でコマンド単位のホワイトリスト（`/usr/bin/apt` のみ等）を設けると標準モジュールは動作しません。
+
+* **標準推奨**: ターゲット側の `authorized_keys` で `from="<Controller-IP>"` を指定して鍵の外部悪用を防ぎ、Ansible ユーザーには `NOPASSWD: ALL` を付与する。
+* **極限セキュリティ（コマンド直叩き構成）**:
+  Ansible モジュール（`ansible.builtin.apt` 等）の代わりに、Playbook で `become: no` とし `ansible.builtin.command: sudo /usr/bin/apt-get dist-upgrade -y` のように記述。
+  ターゲット側の `/etc/sudoers.d/opsadmin` を以下のように固定：
+  ```sudoers
+  opsadmin ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/sbin/reboot, /usr/bin/systemctl
+  ```
+
+### 3.4 ターゲットノードからの逆方向インバウンド遮断
+ターゲットノード（Web/DB）が仮に Web アプリの脆弱性で侵入された場合、ターゲットから管理サーバーへ逆侵入されるのを防ぐため、ターゲットから管理サーバーへの通信（Egress / Ingress）をファイアウォールでブロックします。
+```bash
+# 管理サーバー側で特定管理端末からのみSSHを受け付ける例 (ufw)
+sudo ufw default deny incoming
+sudo ufw allow from <管理者社内IP> to any port 22
+sudo ufw enable
+```
+
+---
+
+## 4. UI管理・チーム運用へのステップアップ（AWX / AAP）
 
 cronベースの管理サーバー1台運用から、Web UI、RBAC（権限管理）、監査ログ、スケジューラーを備えたチーム運用へ移行する場合のパスです。
 
@@ -60,7 +116,7 @@ cronベースの管理サーバー1台運用から、Web UI、RBAC（権限管�
 
 ---
 
-## 4. オンライン情報・公式リファレンス リンク集
+## 5. オンライン情報・公式リファレンス リンク集
 
 ### 公式コアリファレンス
 * [Ansible Core 公式ドキュメント（最新版）](https://docs.ansible.com/ansible/latest/index.html)

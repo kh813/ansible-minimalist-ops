@@ -14,6 +14,9 @@
 * **徹底した多重防御**:
   * **第0防衛線**: 外部ネットワーク・DNS疎通確認（不通時は安全に更新スキップ）。
   * **第1防衛線**: ディスク容量（`/`, `/boot`）、iノード枯渇（使用率90%）、パッケージ管理DB事前破損チェック（`dpkg --audit` / `dnf check`）。
+* **水平展開（Lateral Movement）防止**:
+  * 管理対象側での SSH 接続元 IP 固定（`from="<Controller-IP>"`）により、万一の秘密鍵流出時も外部からの侵入を遮断。
+  * 管理コントローラーへの MFA（Google Authenticator / TOTP）導入とゼロトラスト踏み台化を推奨。
 * **無停止保証**: ロードバランサー（LB）からの安全なトラフィックドレイン＆自動復帰。
 * **締め出し防止**: パッチ適用後にSSH再接続・sudo特権昇格テストを実施。
 * **深層ヘルスチェック**: 単なるHTTP 200だけでなくレスポンス本文のキーワード精査、DBポート待機、リトライ機構（最大2分）。
@@ -37,11 +40,16 @@ ansible-minimalist-ops/
 │   ├── STARTUP_GUIDE.md           # 🔰 初心者向けスタートアップガイド
 │   └── ADVANCED_GUIDE.md          # 🚀 熟練ユーザー向け拡張ガイド＆公式リンク集
 ├── playbooks/
-    ├── check_updates.yml          # 【Linux監視】脆弱性スキャン・JSON出力・Slack通知
-    ├── apply_updates.yml          # 【Linux更新】事前検査・LBドレイン・更新・検証・緊急発報
-    ├── win_check_updates.yml      # 【Windows監視】Windows Update差分スキャン & 通知
-    ├── win_apply_updates.yml      # 【Windows更新】Windows Update適用 & 多重再起動復帰
-    └── mac_apply_updates.yml      # 【macOS更新】Homebrew・開発CLIツール一括更新
+│   ├── check_updates.yml          # 【Linux監視】脆弱性スキャン・JSON出力・Slack通知
+│   ├── apply_updates.yml          # 【Linux更新】事前検査・LBドレイン・更新・検証・緊急発報
+│   ├── win_check_updates.yml      # 【Windows監視】Windows Update差分スキャン & 通知
+│   ├── win_apply_updates.yml      # 【Windows更新】Windows Update適用 & 多重再起動復帰
+│   └── mac_apply_updates.yml      # 【macOS更新】Homebrew・開発CLIツール一括更新
+└── tests/                         # ★Docker 統合テスト環境
+    ├── Dockerfile.target          # systemd 稼働ターゲット (Ubuntu 24.04)
+    ├── Dockerfile.manager         # Ansible 実行元 Controller
+    ├── docker-compose.yml         # テスト環境定義
+    └── run_tests.sh               # ワンコマンド全自動テスト実行スクリプト
 ```
 
 ---
@@ -68,11 +76,16 @@ ssh-keygen -t ed25519 -C "ansible-manager@ops" -f ~/.ssh/ansible_manager_key -N 
 ### 2. 管理対象サーバー（Linux）の受入設定（初回のみ）
 
 管理対象ノードで、管理サーバーの公開鍵を受け入れ、パスワードなしsudoを付与します。
+（セキュリティ向上のため、接続元IP制限 `from="<Controller-IP>"` の付与を推奨）
 
 ```bash
 sudo useradd -m -s /bin/bash opsadmin
 sudo mkdir -p /home/opsadmin/.ssh
-echo "ssh-ed25519 AAAAC3...[公開鍵の中身]..." | sudo tee /home/opsadmin/.ssh/authorized_keys
+
+# セキュリティ推奨: from="管理サーバーIP" で接続元を固定
+# 例: 管理サーバーが 192.168.10.10 の場合
+echo 'from="192.168.10.10" ssh-ed25519 AAAAC3...[公開鍵の中身]...' | sudo tee /home/opsadmin/.ssh/authorized_keys
+
 sudo chown -R opsadmin:opsadmin /home/opsadmin/.ssh
 sudo chmod 700 /home/opsadmin/.ssh
 sudo chmod 600 /home/opsadmin/.ssh/authorized_keys
@@ -164,4 +177,4 @@ all:
 * 📖 **[実践 運用・保守詳細マニュアル（本編）](ansible_minimalist_ops.md)**:
   アーキテクチャ詳細、多重防衛仕様、実機パラメータ微調整ガイド、トラブルシューティングを網羅した完全版仕様書。
 * 🚀 **[熟練ユーザー向け拡張ガイド ＆ リンク集](docs/ADVANCED_GUIDE.md)**:
-  Ansible Vaultによるシークレット暗号化、AWS/Azure動的インベントリ、AWX/AAP連携、公式リファレンスリンク集。
+  コントローラーMFA/Zero Trustによる水平展開防止、Ansible Vaultによるシークレット暗号化、AWS/Azure動的インベントリ、AWX/AAP連携、公式リファレンスリンク集。

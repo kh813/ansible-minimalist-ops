@@ -90,6 +90,56 @@ Ansibleはデーモン常駐型ではなく、コマンド実行時のみPython�
 | **推奨OS** | Ubuntu Server 24.04 LTS / Rocky Linux 9 | Ubuntu Server 24.04 LTS / Rocky Linux 9 | 長期サポート(LTS)版を採用 |
 | **ネットワーク**| 100 Mbps (社内LAN) | 1 Gbps (社内LAN) | パッケージ取得・配信の並列帯域 |
 
+### 2.3 管理サーバー侵害時の水平展開（Lateral Movement）防止設計
+
+Ansible はエージェントレスで全配下サーバーの root 権限操作を行える強力な仕組みである反面、**「Ansible 管理サーバー（コントローラー）が万一乗っ取られた場合、全サーバーに不正侵入・改ざんが拡大する（サプライチェーン攻撃・水平移動のリスク）」** という重大なセキュリティ課題を孕んでいます。
+
+本プロジェクトでは、夜間の完全無人自動運用（cron / unattended run）の継続性を損なうことなく、被害範囲を最小限に抑え込む（Blast Radius の局所化）多層防御（Defense-in-Depth）設計を採用しています。
+
+```
+[攻撃者・外部侵入者]
+        │ ❌ 外部直接SSH接続は拒絶 (MFA / Zero Trust / IP制限)
+        ▼
+┌──────────────────────────────────────────────┐
+│  Ansible 管理サーバー (Controller)           │
+│  ・SSH ログイン時に多要素認証 (MFA: TOTP) 必須 │
+│  ・cron による unattended 自動バッチ実行     │
+└───────┬──────────────────────────────────────┘
+        │ SSH (秘密鍵)
+        ▼
+┌──────────────────────────────────────────────┐
+│  管理対象サーバー (Target Node: Web / DB)    │
+│  ・authorized_keys に from="<Controller-IP>" │
+│    ⇒ 秘密鍵が外部に漏洩しても他所からは接続不可│
+│  ・ターゲット側からの逆方向通信 (Ingress) 遮断 │
+└──────────────────────────────────────────────┘
+```
+
+#### 対策①：管理対象側での接続元 IP 固定（`from="<Controller-IP>"`）
+管理対象ノードの `authorized_keys` に、公開鍵だけでなく接続元 IP（または管理セグメント CIDR）を必ず明記します。
+```text
+from="192.168.10.10" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... ansible-manager@ops
+```
+* **効果**: 万一、管理サーバーから SSH 秘密鍵ファイル（`ansible_manager_key`）が外部に窃取・流出した場合でも、攻撃者のローカル PC や外部 VPS から直接管理対象ノードへ SSH ログインすることはプロトコルレベルで拒絶されます。
+
+#### 対策②：管理コントローラーの外郭防御と多要素認証（MFA）
+夜間の自動バッチ実行（cron）を動かすため、「Ansible コマンド実行のたびにスマホでワンタイムパスワードを入力する」運用は不可能です。そのため、**「コントローラーそのものへの人為的ログイン」の境界線で MFA を強制**します。
+1. **SSH PAM + Google Authenticator (TOTP)**: 管理コントローラーへの SSH 接続時に、パスワード＋認証アプリ（Google Authenticator 等）による 6 桁の TOTP 入力を必須化。
+2. **Zero Trust ネットワーク / 踏み台経由のみのアクセス**: 管理コントローラーをパブリックインターネットに一切晒さず、Tailscale SSH や Cloudflare Access、AWS SSM Session Manager 等を介して IdP（Google Workspace / Okta / Entra ID）の MFA をパスした管理者端末からのみアクセスを許可。
+
+#### 対策③：sudo 権限制限の技術的現実と選択肢
+* **Ansible モジュール実行の技術的制約**:
+  Ansible が `become: yes`（特権昇格）で実行される際、裏側ではターゲットノードの一時ディレクトリ（`~/.ansible/tmp/`）に Python スクリプト一式を SFTP 転送し、`sudo -H -S -n -u root /bin/sh -c 'python3 ...'` の形式で実行されます。
+  そのため、`/etc/sudoers` で `/usr/bin/apt` や `/usr/bin/dnf` のみ許可するバイナリホワイトリストを指定すると、Ansible の標準モジュール（`ansible.builtin.apt` 等）は **パスワード要求エラーとなり一切動作しなくなります**。
+* **推奨の運用モデル**:
+  * **通常運用（標準推奨）**: 対策①（接続元 IP 固定）＋対策②（コントローラー MFA）＋ネットワーク境界防御で堅牢性を確保し、Ansible ユーザーには `NOPASSWD: ALL` を付与して標準モジュールの恩恵を最大限に活用する。
+  * **極めて厳格な制限が求められる環境（コマンド直叩き構成）**:
+    Playbook で `become: no` とし、タスク内で明示的に `ansible.builtin.command: sudo /usr/bin/apt-get dist-upgrade -y` のようにフルパスで叩く構成に差し替えた上で、`/etc/sudoers.d/opsadmin` に `/usr/bin/apt-get, /usr/sbin/reboot, /usr/bin/systemctl` のみをホワイトリスト設定する。
+
+#### 対策④：ターゲット側から管理サーバーへのインバウンド逆流遮断
+管理サーバーから管理対象サーバーへの SSH（Port 22）アウトバウンドは許可しますが、**管理対象サーバーから管理サーバー方向へのインバウンド通信はファイアウォール（UFW / iptables / クラウドセキュリティグループ）で完全に遮断**します。
+これにより、万一 Web サーバーなどが外部から Web 改ざん・侵入被害に遭った場合でも、そこを踏み台にして管理サーバーへ逆侵入（Reverse Shell や特権奪取）されるリスクを排除します。
+
 ---
 
 ## 3. 初期セットアップと環境構成
@@ -132,7 +182,7 @@ ansible-minimalist-ops/
 ├── ansible.cfg                    # 共通設定（ログ出力、並列数等）
 ├── run_ops.sh                     # cron実行用ラッパースクリプト（flock・外監視連携）
 ├── inventory/
-│   └── hosts.ini                  # 対象ホスト一覧（グループ・固有変数定義）
+│   └── hosts.yml                  # 対象ホスト一覧（グループ・固有変数定義・YAML形式）
 ├── playbooks/
 │   │  # --- [フェーズ1: Linux] ---
 │   ├── check_updates.yml          # 【監視】セキュリティ更新チェック & 通知
@@ -155,7 +205,7 @@ ansible-minimalist-ops/
 
 ```ini
 [defaults]
-inventory = inventory/hosts.ini
+inventory = inventory/hosts.yml
 remote_user = opsadmin
 private_key_file = ~/.ssh/ansible_manager_key
 host_key_checking = False
@@ -262,11 +312,11 @@ all:
 
 | パラメータ名 | 定義場所 | 設定内容と微調整のポイント |
 | :--- | :--- | :--- |
-| **`drain_healthcheck_file`** | `hosts.ini` | **LBドレイン用ファイルパス**: AWS ALB、Cloudflare、Nginx、HAProxy等のロードバランサーが監視しているヘルスチェック用静的ファイル（例: `/var/www/html/healthz`）を指定します。<br>※ファイルを一時退避（`.disabled`）することでLBに自動でUnhealthyと認識させ、無停止で切り離します。 |
+| **`drain_healthcheck_file`** | `hosts.yml` | **LBドレイン用ファイルパス**: AWS ALB、Cloudflare、Nginx、HAProxy等のロードバランサーが監視しているヘルスチェック用静的ファイル（例: `/var/www/html/healthz`）を指定します。<br>※ファイルを一時退避（`.disabled`）することでLBに自動でUnhealthyと認識させ、無停止で切り離します。 |
 | **`drain_wait_seconds`** | `apply_updates.yml` | **コネクション抜け待ち時間**: LBから切り離した後、処理中の既存リクエストが完了するのを待つ秒数（デフォルト25秒）。ロングポーリングや決済処理など長時間の接続があるアプリは `45` 〜 `60` 秒に拡大を推奨。 |
-| **`healthcheck_expected_body`** | `hosts.ini` | **深層ヘルスチェック期待値**: 単なるHTTP 200だけでなく、アプリが内部（DB接続等）まで正常稼働しているかを確認する文字列（例: `{"status":"ok"}` や `healthy`）。 |
-| **`target_services`** | `hosts.ini` | **ホスト固有必須サービス一覧**: 各サーバーで再起動後に必ず稼働していなければならないデーモン（例: `nginx`, `postgresql`, `docker`, `redis` 等）をJSON配列形式で定義。 |
-| **`db_check_port`** | `hosts.ini` | **DB待受ポート**: DBサーバーの再起動復帰時に外部からポート疎通を確認するポート番号（PostgreSQLなら `5432`、MySQLなら `3306` 等）。 |
+| **`healthcheck_expected_body`** | `hosts.yml` | **深層ヘルスチェック期待値**: 単なるHTTP 200だけでなく、アプリが内部（DB接続等）まで正常稼働しているかを確認する文字列（例: `ok` や `{"status":"ok"}`）。 |
+| **`target_services`** | `hosts.yml` | **ホスト固有必須サービス一覧**: 各サーバーで再起動後に必ず稼働していなければならないデーモン（例: `nginx`, `postgresql`, `docker`, `redis` 等）を配列形式で定義。 |
+| **`db_check_port`** | `hosts.yml` | **DB待受ポート**: DBサーバーの再起動復帰時に外部からポート疎通を確認するポート番号（PostgreSQLなら `5432`、MySQLなら `3306` 等）。 |
 | **`retries` / `delay`** | `apply_updates.yml` | **Web復帰リトライ設定**: Webサービスの起動所要時間（Java/Tomcat、Python、Node、Docker等のアプリ起動時間）に合わせて回数と間隔を調整（デフォルト: 10秒おき×12回＝最大2分間）。 |
 
 ---
@@ -276,12 +326,17 @@ all:
 ### 4.1 管理対象側の受入準備（Linux初回のみ）
 
 管理対象ノード側にはGitもAnsible本体も不要です。管理サーバーの公開鍵を受け入れ、パスワードなしsudoを付与するだけで準備が整います。
+**セキュリティ向上のため、接続元IP制限（`from="<Controller-IP>"`）を付与して登録することを強く推奨します。**
 
 ```bash
 # 【管理対象Linux側で1回だけ実行】
 sudo useradd -m -s /bin/bash opsadmin
 sudo mkdir -p /home/opsadmin/.ssh
-echo "ssh-ed25519 AAAAC3...[公開鍵の中身]..." | sudo tee /home/opsadmin/.ssh/authorized_keys
+
+# セキュリティ強化: from="管理サーバーIP" を付与して鍵を登録（水平展開・不正利用防止）
+# 例: 管理サーバーが 192.168.10.10 の場合
+echo 'from="192.168.10.10" ssh-ed25519 AAAAC3...[管理サーバーの公開鍵の中身]...' | sudo tee /home/opsadmin/.ssh/authorized_keys
+
 sudo chown -R opsadmin:opsadmin /home/opsadmin/.ssh
 sudo chmod 700 /home/opsadmin/.ssh
 sudo chmod 600 /home/opsadmin/.ssh/authorized_keys

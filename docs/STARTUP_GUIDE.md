@@ -49,11 +49,17 @@ ssh-keygen -t ed25519 -C "ansible-manager@ops" -f ~/.ssh/ansible_manager_key -N 
 ### ステップ②：管理対象サーバー側の受入（初回1回のみ）
 管理したいサーバーにログインし、管理サーバーの公開鍵（`~/.ssh/ansible_manager_key.pub` の中身）を登録し、パスワードなし sudo を付与します。
 
+> [!TIP]
+> **セキュリティ強化（推奨）**: 公開鍵の前に `from="<管理サーバーIP>"` を付けることで、管理サーバー以外からの不正ログインを遮断できます（秘密鍵が盗まれた場合の被害拡大・乗っ取りを防止）。
+
 ```bash
 # 【対象サーバー上で実行】
 sudo useradd -m -s /bin/bash opsadmin
 sudo mkdir -p /home/opsadmin/.ssh
-echo "ssh-ed25519 AAAAC3...[公開鍵の中身]..." | sudo tee /home/opsadmin/.ssh/authorized_keys
+
+# セキュリティ強化版（推奨）: 管理サーバーのIPアドレス（例: 192.168.10.10）を指定
+echo 'from="192.168.10.10" ssh-ed25519 AAAAC3...[公開鍵の中身]...' | sudo tee /home/opsadmin/.ssh/authorized_keys
+
 sudo chown -R opsadmin:opsadmin /home/opsadmin/.ssh
 sudo chmod 700 /home/opsadmin/.ssh
 sudo chmod 600 /home/opsadmin/.ssh/authorized_keys
@@ -117,6 +123,6 @@ ansible linux_servers -m ping
 | 現象 | 主な原因 | 解決策 |
 | :--- | :--- | :--- |
 | **`yaml.scanner.ScannerError`** | YAMLのインデント（半角スペース）が崩れている | タブ文字を使わず、半角スペース2文字でインデントを揃えてください。VS Code等のエディタを使うとミスを防げます。 |
-| **`Permission denied (publickey)`** | SSH公開鍵が対象サーバーに正しく登録されていない | 対象サーバーの `/home/opsadmin/.ssh/authorized_keys` の内容と権限（`600`）を確認してください。 |
+| **`Permission denied (publickey)`** | SSH公開鍵が対象サーバーに正しく登録されていない、または `from="IP"` の接続元IPが一致していない | 対象サーバーの `/home/opsadmin/.ssh/authorized_keys` の内容と権限（`600`）、および管理サーバーの送信元IPアドレスを確認してください。 |
 | **`Missing sudo password`** | パスワードなし sudo の設定が不足している | 対象サーバーの `/etc/sudoers.d/opsadmin` に `opsadmin ALL=(ALL) NOPASSWD:ALL` があるか確認してください。 |
 | **`Host is down` / タイムアウト** | ファイアウォール（セキュリティグループ）でポート22が閉じている | 社内LANまたは管理サーバーからのSSH（ポート22）接続を許可してください。 |
